@@ -1748,16 +1748,23 @@ async function loadAllFromSupabase() {
       }));
       localStorage.setItem(SALES_KEY, JSON.stringify(salesData));
     }
-    // 카탈로그 이미지
-    const { data: cats } = await sb.from('catalog_products').select('code,image_url,sale_price').not('image_url', 'is', null);
+    // 카탈로그 전체 로드 (이미지 포함)
+    const { data: cats } = await sb.from('catalog_products')
+      .select('code,name,supply_type,status,normal_price,sale_price,commission_rate,discount_rate,promo_price,note,image_url')
+      .order('code');
     if (cats && cats.length > 0) {
+      // Supabase 데이터로 catAll 업데이트 (이미지, 판매가 반영)
       cats.forEach(c => {
         if (c.image_url) catImages[c.code] = c.image_url;
-        // 수정된 판매가 반영
         const item = catAll.find(r => r.col0 === c.code);
-        if (item && c.sale_price) item.col5 = c.sale_price;
+        if (item) {
+          if (c.sale_price) item.col5 = c.sale_price;
+          if (c.image_url) item._img = c.image_url;
+        }
       });
       localStorage.setItem(CAT_IMG_KEY, JSON.stringify(catImages));
+      saveCatalog();
+      filterCatalog();
     }
     showCloudIndicator();
     return true;
