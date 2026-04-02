@@ -1,116 +1,98 @@
-// Vercel Serverless Function - vlvd.kr 상품 스크래퍼
+// Vercel Serverless Function - vlvd.kr 상품 이미지 스크래퍼
 // 경로: api/cafe24.js
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const { page = 1, limit = 30 } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const { product_no, category = '0', page = '1' } = req.query;
+
+  const fetchOpts = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
+      'Referer': 'https://vlvd.kr/',
+    }
+  };
 
   try {
-    const categories = [
-      'https://vlvd.kr/category/Shop/25/?page=' + page,
-      'https://vlvd.kr/category/%EC%83%81%EC%9D%98/26/?page=' + page,
-      'https://vlvd.kr/category/%ED%95%98%EC%9D%98/27/?page=' + page,
-      'https://vlvd.kr/category/%EC%95%84%EC%9A%B0%ED%84%B0/28/?page=' + page,
-      'https://vlvd.kr/category/%EC%95%A1%EC%84%B8%EC%84%9C%EB%A6%AC/29/?page=' + page,
+    // ── 단일 상품 이미지 ──
+    if (product_no) {
+      const url = `https://vlvd.kr/product/detail/${product_no}/`;
+      const resp = await fetch(url, fetchOpts);
+      if (!resp.ok) return res.status(200).json({ success: false, product_no, image_url: null });
+      const html = await resp.text();
+
+      // og:image 우선
+      const og = html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/)
+                || html.match(/content=["']([^"']+)["'][^>]*property=["']og:image["']/);
+      if (og?.[1]) {
+        let url = og[1];
+        if (url.startsWith('//')) url = 'https:' + url;
+        return res.status(200).json({ success: true, product_no, image_url: url });
+      }
+
+      // detail 이미지
+      const imgs = [...html.matchAll(/(?:src|data-src)=["']((?:https?:)?\/\/[^"']*(?:detail|big|org|medium)[^"']*\.(?:jpg|jpeg|png|webp)[^"']*)["']/gi)];
+      if (imgs[0]) {
+        let url = imgs[0][1];
+        if (url.startsWith('//')) url = 'https:' + url;
+        return res.status(200).json({ success: true, product_no, image_url: url });
+      }
+
+      return res.status(200).json({ success: false, product_no, image_url: null });
+    }
+
+    // ── 카테고리 스크래핑 ──
+    const CATEGORIES = [
+      'https://vlvd.kr/category/Shop/25/',
+      'https://vlvd.kr/category/%EC%83%81%EC%9D%98/26/',
+      'https://vlvd.kr/category/%ED%95%98%EC%9D%98/27/',
+      'https://vlvd.kr/category/%EC%95%84%EC%9A%B0%ED%84%B0/28/',
+      'https://vlvd.kr/category/%EC%95%A1%EC%84%B8%EC%84%9C%EB%A6%AC/29/',
     ];
 
-    const targetUrl = req.query.url
-      ? decodeURIComponent(req.query.url)
-      : categories[0];
+    const catIdx = Math.min(parseInt(category), CATEGORIES.length - 1);
+    const targetUrl = `${CATEGORIES[catIdx]}?page=${page}`;
 
-    const response = await fetch(targetUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'ko-KR,ko;q=0.9',
-        'Referer': 'https://vlvd.kr/',
-      }
-    });
+    const resp = await fetch(targetUrl, fetchOpts);
+    if (!resp.ok) return res.status(502).json({ error: `${resp.status}`, url: targetUrl });
+    const html = await resp.text();
 
-    if (!response.ok) {
-      return res.status(502).json({ error: `vlvd.kr 응답 오류: ${response.status}` });
-    }
-
-    const html = await response.text();
-
-    // 상품 파싱 (Cafe24 공통 구조)
     const products = [];
-
-    // 상품 번호 추출
-    const productNoRegex = /\/product\/[^\/]+\/(\d+)\//g;
-    const imgRegex = /<img[^>]+src=["']([^"']*(?:product|goods)[^"']*\.(?:jpg|jpeg|png|webp)[^"']*)["']/gi;
-    const nameRegex = /class="[^"]*prd[-_]?name[^"]*"[^>]*>\s*<[^>]+>\s*([^<]+)/gi;
-    const priceRegex = /class="[^"]*price[^"]*"[^>]*>\s*([0-9,]+)\s*원/gi;
-
-    // 상품 링크 기반 파싱
-    const productLinkRegex = /href="(\/product\/[^"]+\/(\d+)\/[^"]*)"[^>]*>[\s\S]*?<img[^>]+(?:src|data-src)=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)["'][^>]*>[\s\S]*?(?:class="[^"]*(?:name|title)[^"]*"[^>]*>([^<]+))?/gi;
-
-    // 더 단순한 파싱: 모든 상품 이미지와 이름 추출
-    const listPattern = /xans-record-[^"]*"[\s\S]*?href="(\/product\/([^"]+)\/(\d+)\/[^"]*)"[\s\S]*?(?:data-src|src)="([^"]*(?:product|prd)[^"]*\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"[\s\S]*?(?:<p[^>]*>|<span[^>]*>|<strong[^>]*>)\s*([^<\n]+?)(?:\s*<\/(?:p|span|strong)>)/gi;
-
-    let match;
     const seen = new Set();
 
-    while ((match = listPattern.exec(html)) !== null) {
-      const [, path, , productNo, imgSrc, name] = match;
-      if (seen.has(productNo)) continue;
-      seen.add(productNo);
+    // 상품 번호와 이미지 추출
+    const noPattern = /\/product\/[^\/]+\/(\d{5,8})\//g;
+    const imgPattern = /(?:src|data-src|data-original)=["']((?:https?:)?\/\/[^"']*\.(?:jpg|jpeg|png|webp)(?:\?[^"']*)?)["']/gi;
 
-      let imageUrl = imgSrc;
-      if (imageUrl.startsWith('//')) imageUrl = 'https:' + imageUrl;
-      if (imageUrl.startsWith('/')) imageUrl = 'https://vlvd.kr' + imageUrl;
+    const nos = [...html.matchAll(noPattern)].map(m => m[1]).filter((v, i, a) => a.indexOf(v) === i);
+    const imgs = [...html.matchAll(imgPattern)]
+      .map(m => m[1])
+      .filter(u => !u.includes('noimage') && !u.includes('blank') && !u.includes('ico'));
 
-      products.push({
-        product_no: productNo,
-        product_name: name.trim(),
-        image_url: imageUrl,
-        product_url: 'https://vlvd.kr' + path,
-      });
+    for (let i = 0; i < nos.length && i < imgs.length; i++) {
+      if (seen.has(nos[i])) continue;
+      seen.add(nos[i]);
+      let imgUrl = imgs[i];
+      if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
+      products.push({ product_no: nos[i], image_url: imgUrl });
     }
 
-    // 패턴이 안 맞으면 fallback: 이미지와 상품번호 별도 추출
-    if (products.length === 0) {
-      const imgMatches = [...html.matchAll(/<img[^>]+(?:src|data-src)=["']([^"']*(?:200x200|300x300|product|goods)[^"']*\.(?:jpg|jpeg|png|webp)[^"']*)["']/gi)];
-      const noMatches = [...html.matchAll(/\/product\/[^\/]+\/(\d+)\//g)];
-      const nameMatches = [...html.matchAll(/class="[^"]*(?:name|title)[^"]*"[^>]*>[\s\S]*?<[^>]*>\s*([^\n<]{3,50})/gi)];
-
-      const count = Math.min(imgMatches.length, noMatches.length);
-      for (let i = 0; i < count; i++) {
-        if (seen.has(noMatches[i][1])) continue;
-        seen.add(noMatches[i][1]);
-
-        let imageUrl = imgMatches[i][1];
-        if (imageUrl.startsWith('//')) imageUrl = 'https:' + imageUrl;
-
-        products.push({
-          product_no: noMatches[i][1],
-          product_name: nameMatches[i] ? nameMatches[i][1].trim() : `상품 ${noMatches[i][1]}`,
-          image_url: imageUrl,
-          product_url: `https://vlvd.kr/product/detail/${noMatches[i][1]}/`,
-        });
-      }
-    }
-
-    // 다음 페이지 존재 여부
-    const hasNext = html.includes('다음') || html.includes('next') ||
-      new RegExp(`page=${parseInt(page) + 1}`).test(html);
+    const hasNext = html.includes(`page=${parseInt(page)+1}`);
 
     return res.status(200).json({
       success: true,
+      category: catIdx,
       page: parseInt(page),
       count: products.length,
       has_next: hasNext,
       products,
-      source_url: targetUrl,
     });
 
-  } catch (error) {
-    return res.status(500).json({
-      error: error.message,
-      detail: '서버에서 vlvd.kr 접근 중 오류가 발생했어요.'
-    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 }
